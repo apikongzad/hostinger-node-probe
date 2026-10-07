@@ -31,7 +31,10 @@ pnpm start
 ```
 
 `next.config.ts` intentionally sets no `output` option; Hostinger injects
-`output: standalone` itself.
+`output: standalone` itself. `@swc/helpers` is a direct dependency pinned to
+0.5.23 (the exact version `next@16.3.6` requires) because Hostinger relocates
+`next` outside pnpm's virtual store, which otherwise breaks with
+`Cannot find module '@swc/helpers/_/_interop_require_default'`.
 
 ## Interpreting hosted results
 
