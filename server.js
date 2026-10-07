@@ -554,6 +554,407 @@ async function handleDiagRun(res, query) {
   await cleanupAndRespond(requests);
 }
 
+async function handleDiagLsrun(res, query) {
+  const rawDir = firstParam(query.dir);
+  const rawPaths = firstParam(query.paths);
+  const hostHeader = firstParam(query.host) || 'test.demetex.life';
+  const rawEnvFile = firstParam(query.envFile);
+  const rawUnset = firstParam(query.unset);
+  const rawSet = firstParam(query.set);
+  let waitMs = parseInt(firstParam(query.wait), 10);
+  if (isNaN(waitMs)) waitMs = 20000;
+  waitMs = Math.min(60000, Math.max(500, waitMs));
+  const rawPreload = firstParam(query.preload);
+
+  if (typeof rawDir !== 'string' || !path.isAbsolute(rawDir)) {
+    sendJson(res, 403, { ok: false, error: 'forbidden' });
+    return;
+  }
+  if (!isAllowedRunDir(rawDir)) {
+    sendJson(res, 403, { ok: false, error: 'forbidden' });
+    return;
+  }
+
+  let dirStat;
+  try {
+    dirStat = fs.statSync(rawDir);
+  } catch (e) {
+    sendJson(res, 404, { ok: false, error: 'not found: ' + rawDir });
+    return;
+  }
+  if (!dirStat.isDirectory()) {
+    sendJson(res, 400, { ok: false, error: 'not a directory' });
+    return;
+  }
+
+  let targets;
+  if (typeof rawPaths !== 'string' || rawPaths.length === 0) {
+    targets = ['/api/health', '/', '/zz-diag-404'];
+  } else {
+    targets = rawPaths.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+    if (targets.length === 0) targets = ['/api/health', '/', '/zz-diag-404'];
+  }
+  const hostStr = String(hostHeader);
+
+  let envFile = null;
+  if (typeof rawEnvFile === 'string' && rawEnvFile.length > 0) {
+    envFile = rawEnvFile;
+    if (!path.isAbsolute(envFile)) {
+      sendJson(res, 403, { ok: false, error: 'forbidden' });
+      return;
+    }
+    if (!/^\/home\/u400017829\/domains\/[^/]+\/hbuilds\/config\/\.env$/.test(envFile)) {
+      sendJson(res, 403, { ok: false, error: 'forbidden' });
+      return;
+    }
+    if (!isAllowedPath(envFile)) {
+      sendJson(res, 403, { ok: false, error: 'forbidden' });
+      return;
+    }
+  }
+
+  let preload = null;
+  if (typeof rawPreload === 'string' && rawPreload.length > 0) {
+    preload = rawPreload;
+    if (!path.isAbsolute(preload)) {
+      sendJson(res, 403, { ok: false, error: 'forbidden' });
+      return;
+    }
+    if (!isAllowedPath(preload)) {
+      sendJson(res, 403, { ok: false, error: 'forbidden' });
+      return;
+    }
+  }
+
+  let unsetList = [];
+  if (typeof rawUnset === 'string' && rawUnset.length > 0) {
+    unsetList = rawUnset.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+  }
+
+  const setPairs = [];
+  if (typeof rawSet === 'string' && rawSet.length > 0) {
+    const parts = rawSet.split(',');
+    for (const part of parts) {
+      const t = part.trim();
+      if (!t) continue;
+      const eq = t.indexOf('=');
+      if (eq <= 0) continue;
+      const name = t.slice(0, eq).trim();
+      const value = t.slice(eq + 1);
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
+      setPairs.push({ name: name, value: value });
+    }
+  }
+
+  let tmpDir = null;
+  try {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsrun-'));
+  } catch (_) {
+    try {
+      fs.mkdirSync('/home/u400017829/tmp', { recursive: true });
+      tmpDir = fs.mkdtempSync(path.join('/home/u400017829/tmp', 'lsrun-'));
+    } catch (e) {
+      sendJson(res, 500, { ok: false, error: 'cannot create temp dir' });
+      return;
+    }
+  }
+  const socket = path.join(tmpDir, 'app.sock');
+  const consoleLog = path.join(tmpDir, 'console.log');
+
+  const childEnv = Object.assign({}, process.env);
+  delete childEnv.DIAG_TOKEN;
+  for (const k of Object.keys(childEnv)) {
+    if (k.startsWith('LSNODE_') || k.startsWith('LSAPI_')) delete childEnv[k];
+  }
+  const secretValues = [];
+
+  if (envFile) {
+    let content;
+    try {
+      content = fs.readFileSync(envFile, 'utf8');
+    } catch (e) {
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch (_) {
+        // ignore
+      }
+      const code = e && e.code === 'ENOENT' ? 404 : 500;
+      sendJson(res, code, { ok: false, error: code === 404 ? 'not found: ' + envFile : 'cannot read envFile' });
+      return;
+    }
+    const lines = content.split('\n');
+    for (let line of lines) {
+      line = line.trim();
+      if (!line || line[0] === '#') continue;
+      const eq = line.indexOf('=');
+      if (eq <= 0) continue;
+      const key = line.slice(0, eq).trim();
+      let val = line.slice(eq + 1).trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+      if (val.length >= 2 && ((val[0] === '"' && val[val.length - 1] === '"') || (val[0] === "'" && val[val.length - 1] === "'"))) {
+        val = val.slice(1, -1);
+      }
+      childEnv[key] = val;
+      secretValues.push(val);
+    }
+  }
+
+  for (const name of unsetList) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
+    delete childEnv[name];
+  }
+  for (const p of setPairs) {
+    childEnv[p.name] = p.value;
+    secretValues.push(p.value);
+  }
+  delete childEnv.DIAG_TOKEN;
+
+  childEnv.LSNODE_ROOT = rawDir;
+  childEnv.LSNODE_STARTUP_FILE = 'server.js';
+  childEnv.LSNODE_BIND_SOCKET = '1';
+  childEnv.LSNODE_SOCKET = socket;
+  childEnv.LSNODE_CONSOLE_LOG = consoleLog;
+  childEnv.NODE_ENV = 'production';
+  if (preload) {
+    childEnv.NODE_OPTIONS = '--require ' + preload;
+  } else {
+    delete childEnv.NODE_OPTIONS;
+  }
+
+  let child;
+  try {
+    child = child_process.spawn(process.execPath, ['/usr/local/lsws/fcgi-bin/lsnode.js'], {
+      cwd: rawDir,
+      env: childEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch (_) {
+      // ignore
+    }
+    sendJson(res, 500, { ok: false, error: 'spawn failed' });
+    return;
+  }
+
+  let childOutput = '';
+  let outputTruncated = false;
+  const appendOutput = (chunk) => {
+    if (outputTruncated) return;
+    childOutput += chunk.toString();
+    if (childOutput.length > 60000) {
+      childOutput = childOutput.slice(0, 60000);
+      outputTruncated = true;
+    }
+  };
+  if (child.stdout) child.stdout.on('data', appendOutput);
+  if (child.stderr) child.stderr.on('data', appendOutput);
+
+  let exitCode = null;
+  let signal = null;
+  let exited = false;
+  child.on('exit', (code, sig) => {
+    exitCode = code;
+    signal = sig;
+    exited = true;
+  });
+  child.on('error', () => {
+    // 'exit' usually follows; polling loop will observe `exited`
+  });
+
+  const trySocketConnect = () => {
+    return new Promise((resolve) => {
+      let sock;
+      try {
+        sock = net.createConnection({ path: socket });
+      } catch (_) {
+        resolve(false);
+        return;
+      }
+      let done = false;
+      const finish = (ok) => {
+        if (done) return;
+        done = true;
+        try {
+          sock.destroy();
+        } catch (_) {
+          // ignore
+        }
+        resolve(ok);
+      };
+      sock.setTimeout(1000);
+      sock.on('connect', () => finish(true));
+      sock.on('timeout', () => finish(false));
+      sock.on('error', () => finish(false));
+    });
+  };
+
+  const fetchViaSocket = (targetPath) => {
+    return new Promise((resolve) => {
+      const started = Date.now();
+      let req;
+      try {
+        req = http.request(
+          {
+            socketPath: socket,
+            path: targetPath,
+            method: 'GET',
+            headers: {
+              Host: hostStr,
+              'X-Forwarded-For': '203.0.113.9',
+              'X-Forwarded-Proto': 'https',
+              Accept: 'text/html,*/*',
+            },
+            timeout: 30000,
+          },
+          (resp) => {
+            let total = 0;
+            let snippet = '';
+            resp.setEncoding('utf8');
+            resp.on('data', (chunk) => {
+              const s = typeof chunk === 'string' ? chunk : String(chunk);
+              total += Buffer.byteLength(s);
+              if (snippet.length < 1500) {
+                snippet += s.slice(0, 1500 - snippet.length);
+              }
+            });
+            resp.on('end', () => {
+              resolve({
+                path: targetPath,
+                status: resp.statusCode,
+                headers: resp.headers,
+                bodyLength: total,
+                bodySnippet: snippet.slice(0, 1500),
+                elapsedMs: Date.now() - started,
+              });
+            });
+            resp.on('error', (e) => {
+              resolve({ path: targetPath, error: String((e && e.message) || e), elapsedMs: Date.now() - started });
+            });
+          }
+        );
+      } catch (e) {
+        resolve({ path: targetPath, error: String((e && e.message) || e), elapsedMs: Date.now() - started });
+        return;
+      }
+      req.setTimeout(30000, () => {
+        req.destroy(new Error('request timeout'));
+      });
+      req.on('timeout', () => {
+        req.destroy(new Error('request timeout'));
+      });
+      req.on('error', (e) => {
+        resolve({ path: targetPath, error: String((e && e.message) || e), elapsedMs: Date.now() - started });
+      });
+      req.end();
+    });
+  };
+
+  const startTime = Date.now();
+  let ready = false;
+  while (Date.now() - startTime < waitMs) {
+    if (exited) break;
+    const ok = await trySocketConnect();
+    if (ok) {
+      ready = true;
+      break;
+    }
+    if (exited) break;
+    await sleep(200);
+  }
+  const socketReadyMs = ready ? Date.now() - startTime : null;
+
+  const requests = [];
+  if (ready) {
+    for (const t of targets) {
+      try {
+        const r = await fetchViaSocket(String(t));
+        requests.push(r);
+      } catch (e) {
+        requests.push({ path: String(t), error: String((e && e.message) || e) });
+      }
+      if (exited) break;
+    }
+  }
+
+  await sleep(1500);
+
+  let logContent = '';
+  try {
+    const fd = fs.openSync(consoleLog, 'r');
+    try {
+      const buf = Buffer.alloc(60000);
+      const n = fs.readSync(fd, buf, 0, 60000, 0);
+      logContent = buf.slice(0, n).toString('utf8');
+    } finally {
+      try {
+        fs.closeSync(fd);
+      } catch (_) {
+        // ignore
+      }
+    }
+  } catch (_) {
+    logContent = '';
+  }
+
+  try {
+    if (!exited) {
+      try {
+        child.kill('SIGTERM');
+      } catch (_) {
+        // ignore
+      }
+      const exitedInTime = await Promise.race([
+        new Promise((r) => {
+          child.once('exit', () => r(true));
+        }),
+        sleep(2000).then(() => false),
+      ]);
+      if (!exitedInTime && !exited) {
+        try {
+          child.kill('SIGKILL');
+        } catch (_) {
+          // ignore
+        }
+        await Promise.race([
+          new Promise((r) => {
+            child.once('exit', () => r(true));
+          }),
+          sleep(2000),
+        ]);
+      }
+    }
+  } catch (_) {
+    // ignore cleanup errors
+  }
+
+  try {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  } catch (_) {
+    // ignore
+  }
+
+  const redact = (s) => {
+    let out = s;
+    const vals = secretValues.filter((v) => typeof v === 'string' && v.length >= 8).sort((a, b) => b.length - a.length);
+    for (const v of vals) {
+      if (!v) continue;
+      out = out.split(v).join('<redacted>');
+    }
+    return out;
+  };
+
+  sendJson(res, 200, {
+    socketReadyMs: socketReadyMs,
+    requests: requests,
+    consoleLog: redact(logContent),
+    childOutput: redact(childOutput),
+    exitCode: exitCode,
+    signal: signal,
+  });
+}
+
 const server = http.createServer((req, res) => {
   const now = new Date().toISOString();
   const host = req.headers.host || '-';
@@ -591,6 +992,16 @@ const server = http.createServer((req, res) => {
       }
       if (pathname === '/diag/run') {
         handleDiagRun(res, query).catch(() => {
+          try {
+            sendJson(res, 500, { ok: false, error: 'run failed' });
+          } catch (_) {
+            // ignore double-send
+          }
+        });
+        return;
+      }
+      if (pathname === '/diag/lsrun') {
+        handleDiagLsrun(res, query).catch(() => {
           try {
             sendJson(res, 500, { ok: false, error: 'run failed' });
           } catch (_) {

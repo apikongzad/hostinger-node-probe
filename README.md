@@ -73,6 +73,7 @@ matches the `DIAG_TOKEN` env var via `crypto.timingSafeEqual`. If
   `{port, requests:[{path, status, headers, bodyLength, bodySnippet}],
   childOutput (cap 60000), exitCode, signal, startupMs}`. Never includes
   env values.
+- `GET /diag/lsrun?dir=<abs>&paths=</api/health,/,/zz-diag-404>&host=<test.demetex.life>&envFile=<...>&unset=<...>&set=<...>&wait=<20000>&preload=<...>&token=...` → runs `/usr/local/lsws/fcgi-bin/lsnode.js` with `LSNODE_*` socket mode, `GET`s each path via unix socket, returns `{socketReadyMs, requests, consoleLog, childOutput, exitCode, signal}` with env values redacted.
 - `GET /diag/info?token=...` → JSON with `process.version`, `execPath`,
   `cwd()`, `argv`, `pid`, `os.uptime()`, env var **names only**, and
   `module.paths`.
