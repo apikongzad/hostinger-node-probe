@@ -35,6 +35,8 @@ pnpm start
 0.5.23 (the exact version `next@16.3.6` requires) because Hostinger relocates
 `next` outside pnpm's virtual store, which otherwise breaks with
 `Cannot find module '@swc/helpers/_/_interop_require_default'`.
+`.npmrc` sets `node-linker=hoisted` (same as the production app) so pnpm
+produces a flat `node_modules` on Hostinger.
 
 ## Interpreting hosted results
 
