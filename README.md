@@ -1,42 +1,41 @@
-# hostinger-node-probe
+# hostinger-node-probe (`next-bare` branch)
 
-A minimal **zero-dependency** Node.js app used to prove whether Hostinger's
-LiteSpeed/Passenger (`lsnode`) + hCDN layer forwards requests to a Node.js app
-on a web hosting account.
+The `next-bare` branch is a bare Next.js 16.3.6 replica used to check whether
+Hostinger's Next.js preset (standalone `server.js` under LiteSpeed/lsnode)
+serves a bare app or returns an empty 200 like `test.demetex.life`.
 
-## Expected responses
+Minimal App Router app (no Tailwind, no ESLint): `/` page + `/api/health`
+route, both `force-dynamic` with stdout logging.
 
-All responses return `200` with headers `X-Probe: node` and
-`Cache-Control: no-store`.
+## Expected results
 
-- `GET /` → `200`, `Content-Type: text/plain; charset=utf-8`,
-  body starting with `hello from node probe`, e.g.
-  `hello from node probe <ISO time> GET /\n`
-- `GET /health` → `200`, `Content-Type: application/json; charset=utf-8`,
-  body `{"ok":true,"pid":<pid>,"uptime":<seconds>}`
-- Any unknown path (e.g. `/zz-404`) and any method → same as `/`:
-  `200`, `text/plain`, body starting with `hello from node probe`.
+- `GET /` → `200`, HTML containing `hello from next bare`.
+- `GET /api/health` → `200`, JSON `{ok:true,app:'next-bare',...}` with
+  header `X-Probe: next-bare`.
+- Unknown path (e.g. `/zz-404`) → `404` (`next-bare 404` page).
 
-Every request writes exactly one line to stdout:
-`<ISO timestamp> <method> <url> <host header> <x-forwarded-for header>`
-(`-` when a header is missing).
+Every render/request writes one line to stdout:
+
+- Page: `[next-bare] page / <ISO time>`
+- API: `[next-bare] GET /api/health <ISO time> host=<host header>`
 
 ## Run locally
 
-No install needed (only Node.js >= 20, no dependencies):
+Requires Node 24 + pnpm 11.13.1 (Hostinger `Next.js` preset):
 
 ```sh
-node server.js
-PORT=3999 node server.js
-npm start
+pnpm install
+pnpm dev
+pnpm build
+pnpm start
 ```
 
-The server listens on `process.env.PORT || 3000`. A non-numeric `PORT`
-(e.g. a unix socket path) is passed through unchanged to `server.listen`.
+`next.config.ts` intentionally sets no `output` option; Hostinger injects
+`output: standalone` itself.
 
 ## Interpreting hosted results
 
-If the hosted site returns an empty `200` **without** the `X-Probe: node`
-header and the Node log shows no request lines, the request never reached
-Node (it was served/short-circuited by LiteSpeed / hCDN / a static layer
-in front of the app).
+If the hosted site returns an empty `200` without the expected body/headers
+and the Node log shows no `[next-bare]` lines, the request never reached the
+Next standalone server (it was served/short-circuited by LiteSpeed / hCDN / a
+static layer in front of the app).
