@@ -77,3 +77,4 @@ matches the `DIAG_TOKEN` env var via `crypto.timingSafeEqual`. If
 - `GET /diag/info?token=...` → JSON with `process.version`, `execPath`,
   `cwd()`, `argv`, `pid`, `os.uptime()`, env var **names only**, and
   `module.paths`.
+- `diag-require.js` is temporary (remove after use).
