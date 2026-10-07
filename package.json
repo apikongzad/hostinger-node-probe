@@ -1,0 +1,14 @@
+{
+  "name": "hostinger-node-probe",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal zero-dependency Node.js probe to verify Hostinger LiteSpeed/Passenger (lsnode) + hCDN request forwarding.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
